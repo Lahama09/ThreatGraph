@@ -8,6 +8,7 @@ The dashboard reads evidence as data only; it never executes uploaded files.
 from __future__ import annotations
 
 import json
+import html
 import re
 import tempfile
 from pathlib import Path
@@ -453,52 +454,232 @@ elif page == "Correlation Graph":
         st.info("No sample pairs share an indicator yet. Import at least two samples with overlapping IOCs.")
 
     st.subheader("Relationship graph")
-    if pairs:
-        if len(pairs) > 1:
-            max_pairs = st.slider(
-                "Maximum sample-pair links to draw",
+    st.markdown(
+        """
+        Explore how evidence connects investigations. Drag nodes to rearrange the map,
+        scroll to zoom, and select any node to inspect its associated evidence.
+        """
+    )
+    if shared:
+        if len(shared) > 1:
+            graph_indicator_limit = st.slider(
+                "Maximum shared indicators to draw",
                 min_value=1,
-                max_value=min(50, len(pairs)),
-                value=min(15, len(pairs)),
+                max_value=min(50, len(shared)),
+                value=min(15, len(shared)),
+                key="relationship_indicator_limit",
             )
         else:
-            max_pairs = 1
+            graph_indicator_limit = 1
 
-        graph_pairs = pairs[:max_pairs]
-        dot_lines = [
-            "graph ThreatGraph {",
-            '  graph [bgcolor="#0b1020", pad="0.25", overlap=false, splines=true];',
-            '  node [style="filled", fontname="Arial", fontsize=10, color="#38506f", fontcolor="#f1f5f9"];',
-            '  edge [color="#64748b", fontname="Arial", fontsize=9, fontcolor="#cbd5e1"];',
+        graph_shared = shared[:graph_indicator_limit]
+        graph_sample_ids = sorted({
+            sample_id for item in graph_shared for sample_id in item["sample_ids"]
+        })
+
+        width = 1180
+        top = 100
+        row_gap = 155
+        height = max(420, top * 2 + row_gap * max(len(graph_sample_ids), len(graph_shared), 1))
+        sample_x, indicator_x = 230, 900
+        sample_positions = {
+            sample_id: (sample_x, top + i * row_gap)
+            for i, sample_id in enumerate(graph_sample_ids)
+        }
+        indicator_positions = {
+            i: (indicator_x, top + i * row_gap)
+            for i, _ in enumerate(graph_shared)
+        }
+        type_colors = {
+            "ipv4": "#f87171", "domain": "#a78bfa", "url": "#f472b6",
+            "filepath": "#fbbf24", "md5": "#4ade80", "sha1": "#4ade80",
+            "sha256": "#4ade80", "sha512": "#4ade80",
+        }
+
+        nodes_meta = {}
+        svg = [
+            f'<svg id="tg-network" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}">',
+            '<defs><pattern id="tg-grid" width="30" height="30" patternUnits="userSpaceOnUse">'
+            '<path d="M30 0H0V30" fill="none" stroke="#25334b" stroke-width="1"/>'
+            '</pattern><filter id="tg-glow"><feGaussianBlur stdDeviation="5" result="b"/>'
+            '<feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>',
+            f'<rect width="{width}" height="{height}" fill="#0b1020"/>',
+            f'<rect width="{width}" height="{height}" fill="url(#tg-grid)"/>',
+            '<text x="230" y="42" text-anchor="middle" fill="#93c5fd" font-size="16" font-weight="700" letter-spacing="2">INVESTIGATION SAMPLES</text>',
+            '<text x="900" y="42" text-anchor="middle" fill="#fbbf24" font-size="16" font-weight="700" letter-spacing="2">SHARED INDICATORS</text>',
+            '<g id="tg-links"></g><g id="tg-nodes">'
         ]
-        nodes = set()
-        for item in graph_pairs:
-            nodes.add(item["sample_a"])
-            nodes.add(item["sample_b"])
 
-        for node in sorted(nodes):
-            dot_lines.append(
-                f'  "{safe_label(node, 80)}" [shape=box, fillcolor="#172b46", margin="0.18,0.12"];'
+        for i, item in enumerate(graph_shared):
+            ioc_type = str(item["ioc_type"])
+            canonical = str(item["canonical_value"])
+            node_id = f"ioc-{i}"
+            x, y = indicator_positions[i]
+            color = type_colors.get(ioc_type.lower(), "#94a3b8")
+            total = sum(item.get("occurrence_counts", {}).values())
+            nodes_meta[node_id] = {
+                "kind": "Shared indicator", "IOC type": ioc_type,
+                "Canonical value": canonical, "Total occurrences": total,
+                "Occurrences by sample": item.get("occurrence_counts", {}),
+                "Samples": item["sample_ids"],
+            }
+
+        for i, sample_id in enumerate(graph_sample_ids):
+            node_id = f"sample-{i}"
+            x, y = sample_positions[sample_id]
+            nodes_meta[node_id] = {
+                "kind": "Investigation sample", "Sample ID": sample_id
+            }
+
+        for i, item in enumerate(graph_shared):
+            node_id = f"ioc-{i}"
+            x, y = indicator_positions[i]
+            color = type_colors.get(str(item["ioc_type"]).lower(), "#94a3b8")
+            total = sum(item.get("occurrence_counts", {}).values())
+            svg.append(
+                f'<g class="tg-node" data-id="{node_id}" transform="translate({x},{y})" tabindex="0" role="button">'
+                f'<rect x="-190" y="-43" width="380" height="86" rx="16" fill="#17243a" stroke="{color}" stroke-width="2.5"/>'
+                f'<circle cx="-160" cy="0" r="9" fill="{color}" filter="url(#tg-glow)"/>'
+                f'<text x="-138" y="-9" fill="{color}" font-size="12" font-weight="700">{html.escape(str(item["ioc_type"]).upper())}</text>'
+                f'<text x="-138" y="17" fill="#f8fafc" font-size="16">{html.escape(str(item["canonical_value"])[:52])}</text>'
+                f'<text x="0" y="64" text-anchor="middle" fill="#94a3b8" font-size="11">{total:,} TOTAL OCCURRENCES</text></g>'
             )
 
-        for item in graph_pairs:
-            a_id = safe_label(item["sample_a"], 80)
-            b_id = safe_label(item["sample_b"], 80)
-            count = item["shared_indicator_count"]
-            dot_lines.append(
-                f'  "{a_id}" -- "{b_id}" [label="{count} shared IOC(s)", '
-                f'penwidth="{min(5, 1 + count * 0.5):.1f}"];'
+        for i, sample_id in enumerate(graph_sample_ids):
+            node_id = f"sample-{i}"
+            x, y = sample_positions[sample_id]
+            svg.append(
+                f'<g class="tg-node" data-id="{node_id}" transform="translate({x},{y})" tabindex="0" role="button">'
+                '<rect x="-165" y="-38" width="330" height="76" rx="15" fill="#17365d" stroke="#60a5fa" stroke-width="2.5"/>'
+                '<circle cx="-137" cy="0" r="8" fill="#93c5fd"/>'
+                f'<text x="-116" y="6" fill="#eff6ff" font-size="17" font-weight="700">{html.escape(str(sample_id)[:34])}</text>'
+                '<text x="0" y="57" text-anchor="middle" fill="#93c5fd" font-size="11">SAMPLE / CASE</text></g>'
             )
 
-        dot_lines.append("}")
-        st.graphviz_chart("\\n".join(dot_lines), use_container_width=True)
+        svg.append('</g></svg>')
+        links = []
+        for i, item in enumerate(graph_shared):
+            for sample_id in item["sample_ids"]:
+                sample_index = graph_sample_ids.index(sample_id)
+                count = item.get("occurrence_counts", {}).get(sample_id, 0)
+                links.append({
+                    "source": f"sample-{sample_index}",
+                    "target": f"ioc-{i}",
+                    "count": count,
+                    "color": type_colors.get(str(item["ioc_type"]).lower(), "#94a3b8"),
+                })
+
+        graph_data = json.dumps({"nodes": nodes_meta, "links": links}, ensure_ascii=True)
+        graph_data = (graph_data.replace("<", "\\u003c").replace(">", "\\u003e")
+                      .replace("&", "\\u0026").replace("\u2028", "\\u2028")
+                      .replace("\u2029", "\\u2029"))
+
+        graph_html = """
+        <div id="tg-wrap" style="background:#0b1020;border:1px solid #293650;border-radius:14px;overflow:hidden;color:#e7ecf5;font-family:Arial,sans-serif">
+          <div style="display:flex;gap:9px;align-items:center;flex-wrap:wrap;padding:12px;background:#111a2d;border-bottom:1px solid #293650">
+            <button id="tg-fit">Fit graph</button><button id="tg-reset">Reset layout</button>
+            <span style="color:#a8b5cc;font-size:13px">Drag nodes · Drag empty space to pan · Scroll to zoom · Select a node for details</span>
+          </div>
+          <div id="tg-stage" style="height:570px;overflow:hidden;cursor:grab;touch-action:none">
+            __SVG__
+          </div>
+          <div id="tg-inspector" style="min-height:60px;padding:12px 15px;background:#111a2d;border-top:1px solid #293650;font-size:13px">
+            <strong style="color:#7dd3fc">Node inspector</strong><div style="color:#a8b5cc;margin-top:5px">Select a sample or indicator node to inspect its evidence relationships.</div>
+          </div>
+        </div>
+        <style>
+          #tg-wrap button{background:#263650;color:#e7ecf5;border:1px solid #49617f;border-radius:7px;padding:7px 12px;cursor:pointer}
+          #tg-wrap button:hover{background:#344967}
+          #tg-network{width:100%;height:100%;display:block;user-select:none}
+          .tg-node{cursor:grab;outline:none}
+          .tg-node:active{cursor:grabbing}
+          .tg-node.selected rect{stroke:#fff;stroke-width:4;filter:drop-shadow(0 0 9px #7dd3fc)}
+          .tg-link{fill:none;stroke-width:3;opacity:.78}
+          .tg-link-label{fill:#dbeafe;font-size:12px}
+        </style>
+        <script>
+        (() => {
+          const data = __DATA__;
+          const svg = document.getElementById('tg-network');
+          const linkLayer = document.getElementById('tg-links');
+          const stage = document.getElementById('tg-stage');
+          const inspector = document.getElementById('tg-inspector');
+          const original = {};
+          svg.querySelectorAll('.tg-node').forEach(n => {
+            const m = n.transform.baseVal.consolidate().matrix;
+            original[n.dataset.id] = {x:m.e,y:m.f};
+          });
+          const positions = JSON.parse(JSON.stringify(original));
+          let scale=1, panX=0, panY=0, activeNode=null, panStart=null, moved=false;
+          function renderLinks(){
+            linkLayer.replaceChildren();
+            data.links.forEach(l=>{
+              const a=positions[l.source], b=positions[l.target];
+              if(!a||!b)return;
+              const x1=a.x+165, y1=a.y, x2=b.x-190, y2=b.y, mid=(x1+x2)/2;
+              const path=document.createElementNS('http://www.w3.org/2000/svg','path');
+              path.setAttribute('d',`M${x1},${y1} C${mid},${y1} ${mid},${y2} ${x2},${y2}`);
+              path.setAttribute('class','tg-link'); path.setAttribute('stroke',l.color);
+              linkLayer.appendChild(path);
+              const tx=mid, ty=(y1+y2)/2-10;
+              const label=document.createElementNS('http://www.w3.org/2000/svg','text');
+              label.setAttribute('x',tx);label.setAttribute('y',ty);label.setAttribute('text-anchor','middle');
+              label.setAttribute('class','tg-link-label');label.textContent=l.count.toLocaleString()+' occurrences';
+              linkLayer.appendChild(label);
+            });
+          }
+          function applyView(){svg.style.transform=`translate(${panX}px,${panY}px) scale(${scale})`;svg.style.transformOrigin='0 0';}
+          function selectNode(node){
+            svg.querySelectorAll('.tg-node').forEach(n=>n.classList.toggle('selected',n===node));
+            inspector.replaceChildren();
+            const h=document.createElement('strong');h.style.color='#7dd3fc';h.textContent=data.nodes[node.dataset.id].kind;inspector.appendChild(h);
+            Object.entries(data.nodes[node.dataset.id]).forEach(([k,v])=>{
+              if(k==='kind')return;
+              const row=document.createElement('div');row.style.marginTop='5px';
+              const key=document.createElement('span');key.style.color='#94a3b8';key.textContent=k+': ';
+              const val=document.createElement('span');val.textContent=typeof v==='object'?JSON.stringify(v):String(v);
+              row.append(key,val);inspector.appendChild(row);
+            });
+          }
+          svg.querySelectorAll('.tg-node').forEach(node=>{
+            node.addEventListener('pointerdown',e=>{
+              e.stopPropagation();activeNode=node;moved=false;node.setPointerCapture(e.pointerId);
+            });
+            node.addEventListener('pointermove',e=>{
+              if(!activeNode||activeNode!==node)return;
+              const rect=stage.getBoundingClientRect();
+              const x=(e.clientX-rect.left-panX)/scale, y=(e.clientY-rect.top-panY)/scale;
+              if(Math.abs(x-positions[node.dataset.id].x)>1||Math.abs(y-positions[node.dataset.id].y)>1)moved=true;
+              positions[node.dataset.id]={x,y};
+              node.setAttribute('transform',`translate(${x},${y})`);renderLinks();
+            });
+            node.addEventListener('pointerup',()=>{if(activeNode===node){activeNode=null;if(!moved)selectNode(node);}});
+            node.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();selectNode(node);}});
+          });
+          stage.addEventListener('pointerdown',e=>{if(e.target.closest('.tg-node'))return;panStart={x:e.clientX-panX,y:e.clientY-panY};stage.setPointerCapture(e.pointerId);stage.style.cursor='grabbing';});
+          stage.addEventListener('pointermove',e=>{if(panStart){panX=e.clientX-panStart.x;panY=e.clientY-panStart.y;applyView();}});
+          stage.addEventListener('pointerup',()=>{panStart=null;stage.style.cursor='grab';});
+          stage.addEventListener('wheel',e=>{e.preventDefault();const factor=e.deltaY<0?1.1:.9;scale=Math.max(.45,Math.min(2.5,scale*factor));applyView();},{passive:false});
+          document.getElementById('tg-fit').addEventListener('click',()=>{scale=1;panX=0;panY=0;applyView();});
+          document.getElementById('tg-reset').addEventListener('click',()=>{
+            Object.keys(original).forEach(id=>{positions[id]={...original[id]};const n=svg.querySelector(`[data-id="${id}"]`);n.setAttribute('transform',`translate(${positions[id].x},${positions[id].y})`);});
+            scale=1;panX=0;panY=0;applyView();renderLinks();
+          });
+          renderLinks();
+        })();
+        </script>
+        """
+        graph_html = graph_html.replace("__SVG__", "".join(svg)).replace("__DATA__", graph_data)
+        components.html(graph_html, height=710, scrolling=False)
+        st.caption(
+            "Blue nodes are investigation samples. Colored nodes are shared indicators. "
+            "Connections show observed evidence and occurrence counts; they do not establish attribution or causality."
+        )
     else:
-        st.caption("A graph will appear when two or more samples share canonical indicators.")
-
-    st.caption(
-        "A shared IOC is a lead for analyst review, not proof of common attribution or maliciousness."
-    )
-
+        st.info(
+            "No shared indicators meet the selected threshold. Import evidence from at least two samples "
+            "containing a common indicator to build a relationship map."
+        )
 
 elif page == "Investigation Graph (3D)":
     page_header(
